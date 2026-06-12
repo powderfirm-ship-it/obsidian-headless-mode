@@ -1,7 +1,7 @@
 {
 	"id": "headless-mode",
 	"name": "Headless Mode",
-	"version": "1.4.0",
+	"version": "1.4.1",
 	"minAppVersion": "1.4.0",
 	"description": "Run headless from a menu bar (tray) icon: hide every window and the Dock icon while the app keeps running in the background, until Headless is unchecked.",
 	"author": "Meirakami",

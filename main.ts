@@ -6,6 +6,11 @@ import {
 	Platform,
 } from "obsidian";
 
+// Obsidian injects this global; it points at the document of the currently
+// focused window (main or popout). Using it instead of `document` keeps the
+// plugin popout-safe.
+declare const activeDocument: Document;
+
 // Minimal structural types for the Electron remote surface we touch. Lets us
 // avoid `any` and the `no-unsafe-*` lints without depending on @types/electron.
 
@@ -109,13 +114,9 @@ function getElectronRemote(): ElectronRemote | null {
 function createTrayIcon(remote: ElectronRemote, color: TrayIconColor): ElectronNativeImage {
 	const fill = color === "black" ? "#000000" : "#ffffff";
 	const image = remote.nativeImage.createEmpty();
-	// activeDocument is Obsidian's popout-aware document; falls back to the
-	// main document if the global isn't present.
-	const doc: Document =
-		(globalThis as unknown as { activeDocument?: Document }).activeDocument ?? document;
 	for (const scale of [1, 2]) {
 		const size = 16 * scale;
-		const canvas = doc.createElement("canvas");
+		const canvas = activeDocument.createElement("canvas");
 		canvas.width = size;
 		canvas.height = size;
 		const ctx = canvas.getContext("2d");
@@ -282,7 +283,8 @@ export default class HeadlessModePlugin extends Plugin {
 	}
 
 	async loadSettings() {
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+		const data = (await this.loadData()) as Partial<HeadlessModeSettings> | null;
+		this.settings = Object.assign({}, DEFAULT_SETTINGS, data ?? {});
 	}
 
 	async saveSettings() {
