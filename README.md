@@ -21,6 +21,22 @@ There are also command palette entries: **Toggle headless mode** and **Go headle
 - **Start headless** — launch Obsidian directly into headless mode.
 - **Hide Dock icon while headless** (macOS) — on by default; turn off if you want the window hidden but the Dock icon kept.
 
+## Updates
+
+The plugin checks this repo's [GitHub releases](https://github.com/powderfirm-ship-it/obsidian-headless-mode/releases) shortly after startup and every 12 hours. When a release newer than the installed version exists:
+
+- a notice appears ("Headless Mode X.Y.Z is available"),
+- the tray menu gains **Update available (X.Y.Z) — Install**,
+- the plugin settings show an **Install X.Y.Z** button.
+
+Installing downloads `main.js` + `manifest.json` from the release into the plugin folder and reloads the plugin in place. There's also a **Check for updates** command and a **Check now** button in settings.
+
+### Cutting a release (maintainer)
+
+1. Bump `version` in `manifest.json` (and `versions.json` / `package.json`), commit, push.
+2. `npm run build`
+3. `gh release create <version> main.js manifest.json versions.json --title "<version>"` — the tag must be the bare semver (no `v` prefix). Installed copies will see it within 12 hours, or immediately via "Check now".
+
 ## Install (manual)
 
 1. Build: `npm install && npm run build`

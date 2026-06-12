@@ -1,4 +1,32 @@
-import { App, Plugin, PluginSettingTab, Setting, Platform } from "obsidian";
+import {
+	App,
+	Notice,
+	Plugin,
+	PluginSettingTab,
+	Setting,
+	Platform,
+	requestUrl,
+} from "obsidian";
+
+/** GitHub repo releases are the update channel for this sideloaded plugin. */
+const GITHUB_REPO = "powderfirm-ship-it/obsidian-headless-mode";
+const UPDATE_CHECK_INTERVAL_MS = 12 * 60 * 60 * 1000;
+
+interface AvailableUpdate {
+	version: string;
+	/** asset filename -> browser_download_url */
+	assets: Record<string, string>;
+}
+
+function isNewerVersion(candidate: string, current: string): boolean {
+	const a = candidate.split(".").map((n) => parseInt(n, 10) || 0);
+	const b = current.split(".").map((n) => parseInt(n, 10) || 0);
+	for (let i = 0; i < Math.max(a.length, b.length); i++) {
+		const diff = (a[i] ?? 0) - (b[i] ?? 0);
+		if (diff !== 0) return diff > 0;
+	}
+	return false;
+}
 
 interface HeadlessModeSettings {
 	/** Launch Obsidian straight into headless mode. */
@@ -87,6 +115,8 @@ export default class HeadlessModePlugin extends Plugin {
 	/** Runtime-only on purpose: a restart never traps the user in a hidden app
 	 *  unless they explicitly opted into "start headless". */
 	headless = false;
+	availableUpdate: AvailableUpdate | null = null;
+	private lastNotifiedVersion: string | null = null;
 	private remote: any = null;
 	private tray: any = null;
 
@@ -112,12 +142,22 @@ export default class HeadlessModePlugin extends Plugin {
 			name: "Go headless (hide window and Dock icon)",
 			callback: () => this.setHeadless(true),
 		});
+		this.addCommand({
+			id: "check-updates",
+			name: "Check for updates",
+			callback: () => this.checkForUpdate(true),
+		});
 
 		this.addSettingTab(new HeadlessModeSettingTab(this.app, this));
 
 		this.app.workspace.onLayoutReady(() => {
 			if (this.settings.startHeadless) this.setHeadless(true);
+			// Update check shouldn't compete with startup; defer it.
+			window.setTimeout(() => this.checkForUpdate(), 10_000);
 		});
+		this.registerInterval(
+			window.setInterval(() => this.checkForUpdate(), UPDATE_CHECK_INTERVAL_MS)
+		);
 	}
 
 	onunload() {
@@ -169,7 +209,7 @@ export default class HeadlessModePlugin extends Plugin {
 	refreshTrayMenu() {
 		if (!this.tray || this.tray.isDestroyed?.()) return;
 		const { Menu } = this.remote;
-		const menu = Menu.buildFromTemplate([
+		const template: any[] = [
 			{
 				label: "Headless",
 				type: "checkbox",
@@ -182,6 +222,17 @@ export default class HeadlessModePlugin extends Plugin {
 				enabled: this.headless,
 				click: () => this.setHeadless(false),
 			},
+		];
+		if (this.availableUpdate) {
+			template.push(
+				{ type: "separator" },
+				{
+					label: `Update available (${this.availableUpdate.version}) — Install`,
+					click: () => this.installUpdate(),
+				}
+			);
+		}
+		template.push(
 			{ type: "separator" },
 			{
 				label: "Quit Obsidian",
@@ -189,9 +240,79 @@ export default class HeadlessModePlugin extends Plugin {
 					this.destroyTray();
 					this.remote.app.quit();
 				},
-			},
-		]);
-		this.tray.setContextMenu(menu);
+			}
+		);
+		this.tray.setContextMenu(Menu.buildFromTemplate(template));
+	}
+
+	/**
+	 * Compare the latest GitHub release against the installed manifest version
+	 * and surface "update available" in the tray menu, settings, and a Notice.
+	 */
+	async checkForUpdate(interactive = false) {
+		try {
+			const res = await requestUrl({
+				url: `https://api.github.com/repos/${GITHUB_REPO}/releases/latest`,
+				headers: { Accept: "application/vnd.github+json" },
+			});
+			const release = res.json;
+			const latest = String(release.tag_name ?? "").replace(/^v/, "");
+			if (latest && isNewerVersion(latest, this.manifest.version)) {
+				const assets: Record<string, string> = {};
+				for (const asset of release.assets ?? []) {
+					assets[asset.name] = asset.browser_download_url;
+				}
+				this.availableUpdate = { version: latest, assets };
+				if (interactive || this.lastNotifiedVersion !== latest) {
+					this.lastNotifiedVersion = latest;
+					new Notice(
+						`Headless Mode ${latest} is available — install it from the tray menu or the plugin settings.`,
+						10_000
+					);
+				}
+			} else {
+				this.availableUpdate = null;
+				if (interactive) new Notice("Headless Mode is up to date.");
+			}
+			this.refreshTrayMenu();
+		} catch (e) {
+			console.error("Headless Mode: update check failed", e);
+			if (interactive) new Notice("Headless Mode: update check failed (offline or rate-limited).");
+		}
+	}
+
+	/**
+	 * Download main.js + manifest.json from the latest release into this
+	 * plugin's folder, then reload the plugin so the new version runs.
+	 */
+	async installUpdate() {
+		const update = this.availableUpdate;
+		if (!update) return;
+		const pluginDir = `${this.app.vault.configDir}/plugins/${this.manifest.id}`;
+		const files = ["main.js", "manifest.json"];
+		try {
+			// Fetch everything before writing anything, so a failed download
+			// can't leave a half-updated plugin on disk.
+			const downloaded: Record<string, string> = {};
+			for (const name of files) {
+				const url = update.assets[name];
+				if (!url) {
+					new Notice(`Headless Mode: release ${update.version} is missing ${name}; not updating.`);
+					return;
+				}
+				downloaded[name] = (await requestUrl({ url })).text;
+			}
+			for (const name of files) {
+				await this.app.vault.adapter.write(`${pluginDir}/${name}`, downloaded[name]);
+			}
+			new Notice(`Headless Mode updated to ${update.version} — reloading plugin.`);
+			const plugins = (this.app as any).plugins;
+			await plugins.disablePlugin(this.manifest.id);
+			await plugins.enablePlugin(this.manifest.id);
+		} catch (e) {
+			console.error("Headless Mode: update install failed", e);
+			new Notice("Headless Mode: update failed — see developer console.");
+		}
 	}
 
 	private destroyTray() {
@@ -254,5 +375,30 @@ class HeadlessModeSettingTab extends PluginSettingTab {
 						}
 					})
 			);
+
+		new Setting(containerEl).setName("Updates").setHeading();
+
+		const update = this.plugin.availableUpdate;
+		const updateSetting = new Setting(containerEl)
+			.setName(`Installed version: ${this.plugin.manifest.version}`)
+			.setDesc(
+				update
+					? `Update available: ${update.version} (from github.com/${GITHUB_REPO})`
+					: "Updates are pulled from the plugin's GitHub releases."
+			);
+		if (update) {
+			updateSetting.addButton((btn) =>
+				btn
+					.setButtonText(`Install ${update.version}`)
+					.setCta()
+					.onClick(() => this.plugin.installUpdate())
+			);
+		}
+		updateSetting.addButton((btn) =>
+			btn.setButtonText("Check now").onClick(async () => {
+				await this.plugin.checkForUpdate(true);
+				this.display();
+			})
+		);
 	}
 }
