@@ -6,17 +6,64 @@ import {
 	Platform,
 } from "obsidian";
 
+// Minimal structural types for the Electron remote surface we touch. Lets us
+// avoid `any` and the `no-unsafe-*` lints without depending on @types/electron.
+
+interface ElectronApp {
+	quit(): void;
+	dock?: { hide(): void; show(): void };
+}
+
+interface ElectronBrowserWindow {
+	hide(): void;
+	show(): void;
+	focus(): void;
+}
+
+interface ElectronNativeImage {
+	addRepresentation(opts: { scaleFactor: number; dataURL: string }): void;
+	setTemplateImage(value: boolean): void;
+}
+
+interface ElectronMenuItem {
+	label?: string;
+	type?: "normal" | "separator" | "checkbox" | "radio";
+	checked?: boolean;
+	enabled?: boolean;
+	click?: (item: { checked: boolean }) => void;
+}
+
+interface ElectronMenu {
+	__brand?: "ElectronMenu";
+}
+
+interface ElectronTray {
+	setToolTip(text: string): void;
+	setContextMenu(menu: ElectronMenu): void;
+	setImage(image: ElectronNativeImage): void;
+	destroy(): void;
+	isDestroyed?(): boolean;
+}
+
+interface ElectronRemote {
+	app: ElectronApp;
+	BrowserWindow: { getAllWindows(): ElectronBrowserWindow[] };
+	Tray: new (image: ElectronNativeImage) => ElectronTray;
+	Menu: { buildFromTemplate(template: ElectronMenuItem[]): ElectronMenu };
+	nativeImage: { createEmpty(): ElectronNativeImage };
+	getCurrentWindow(): ElectronBrowserWindow;
+}
+
 type TrayIconColor = "auto" | "white" | "black";
 
 interface HeadlessModeSettings {
-	/** Launch Obsidian straight into headless mode. */
+	/** Launch directly into headless mode. */
 	startHeadless: boolean;
 	/** Hide the Dock icon while headless (macOS only). */
 	hideDockIcon: boolean;
 	/**
-	 * Menu bar icon color. "auto" lets macOS tint a template image (the
-	 * historical behavior); "white"/"black" force an explicit fill that
-	 * ignores menu bar appearance.
+	 * Menu bar icon color. "auto" lets macOS tint a template image; "white" /
+	 * "black" force an explicit fill that ignores menu bar appearance.
 	 */
 	trayIconColor: TrayIconColor;
 }
@@ -30,43 +77,51 @@ const DEFAULT_SETTINGS: HeadlessModeSettings = {
 // Survives plugin reloads so we never leak a second tray icon.
 const TRAY_GLOBAL = "__headlessModeTray";
 
+interface TrayGlobalCarrier {
+	[TRAY_GLOBAL]?: ElectronTray;
+}
+
 /**
  * Obsidian's renderer exposes Electron's remote module. Newer builds route it
  * through @electron/remote, older ones through electron.remote — try both.
  */
-function getElectronRemote(): any {
-	const req = (window as any).require;
+function getElectronRemote(): ElectronRemote | null {
+	const req = (window as unknown as { require?: (id: string) => unknown }).require;
 	if (!req) return null;
 	try {
-		const remote = req("electron")?.remote;
-		if (remote) return remote;
+		const electron = req("electron") as { remote?: ElectronRemote } | undefined;
+		if (electron?.remote) return electron.remote;
 	} catch {
 		/* fall through */
 	}
 	try {
-		return req("@electron/remote");
+		return req("@electron/remote") as ElectronRemote;
 	} catch {
 		return null;
 	}
 }
 
 /**
- * Draw the tray icon at runtime on a canvas so the plugin ships no binary
- * assets. Color "auto" produces a macOS template image (pure black + alpha,
- * tinted by the OS); "white"/"black" produce an explicit fill.
+ * Draw the tray icon at runtime on a canvas so no binary assets ship. "auto"
+ * produces a macOS template image (pure black + alpha, tinted by the OS);
+ * "white"/"black" produce an explicit fill.
  */
-function createTrayIcon(remote: any, color: TrayIconColor): any {
+function createTrayIcon(remote: ElectronRemote, color: TrayIconColor): ElectronNativeImage {
 	const fill = color === "black" ? "#000000" : "#ffffff";
 	const image = remote.nativeImage.createEmpty();
+	// activeDocument is Obsidian's popout-aware document; falls back to the
+	// main document if the global isn't present.
+	const doc: Document =
+		(globalThis as unknown as { activeDocument?: Document }).activeDocument ?? document;
 	for (const scale of [1, 2]) {
 		const size = 16 * scale;
-		const canvas = document.createElement("canvas");
+		const canvas = doc.createElement("canvas");
 		canvas.width = size;
 		canvas.height = size;
-		const ctx = canvas.getContext("2d")!;
+		const ctx = canvas.getContext("2d");
+		if (!ctx) continue;
 		const s = scale;
 
-		// Gem silhouette: a kite-shaped crystal.
 		ctx.fillStyle = color === "auto" ? "#000000" : fill;
 		ctx.beginPath();
 		ctx.moveTo(8 * s, 1 * s);
@@ -76,8 +131,8 @@ function createTrayIcon(remote: any, color: TrayIconColor): any {
 		ctx.closePath();
 		ctx.fill();
 
-		// Carve facet lines out of the fill via destination-out so they read
-		// as transparent regardless of the fill color.
+		// Carve facet lines via destination-out so they're transparent
+		// regardless of the fill color.
 		ctx.globalCompositeOperation = "destination-out";
 		ctx.lineWidth = 1 * s;
 		ctx.beginPath();
@@ -104,8 +159,8 @@ export default class HeadlessModePlugin extends Plugin {
 	/** Runtime-only on purpose: a restart never traps the user in a hidden app
 	 *  unless they explicitly opted into "start headless". */
 	headless = false;
-	private remote: any = null;
-	private tray: any = null;
+	private remote: ElectronRemote | null = null;
+	private tray: ElectronTray | null = null;
 
 	async onload() {
 		await this.loadSettings();
@@ -121,7 +176,7 @@ export default class HeadlessModePlugin extends Plugin {
 
 		this.addCommand({
 			id: "toggle",
-			name: "Toggle headless mode",
+			name: "Toggle",
 			callback: () => this.setHeadless(!this.headless),
 		});
 		this.addCommand({
@@ -151,6 +206,7 @@ export default class HeadlessModePlugin extends Plugin {
 	}
 
 	private applyHeadless(on: boolean) {
+		if (!this.remote) return;
 		const { app: electronApp, BrowserWindow } = this.remote;
 		if (on) {
 			for (const win of BrowserWindow.getAllWindows()) win.hide();
@@ -161,10 +217,10 @@ export default class HeadlessModePlugin extends Plugin {
 			if (Platform.isMacOS) electronApp.dock?.show();
 			// dock.show() is async; give macOS a beat before raising windows
 			// so the app can become active and actually take focus.
-			setTimeout(() => {
+			window.setTimeout(() => {
 				for (const win of BrowserWindow.getAllWindows()) win.show();
 				try {
-					this.remote.getCurrentWindow().focus();
+					this.remote?.getCurrentWindow().focus();
 				} catch {
 					/* window may have been closed */
 				}
@@ -173,25 +229,27 @@ export default class HeadlessModePlugin extends Plugin {
 	}
 
 	private createTray() {
+		if (!this.remote) return;
 		const { Tray } = this.remote;
-		const stale = (window as any)[TRAY_GLOBAL];
+		const carrier = window as unknown as TrayGlobalCarrier;
+		const stale = carrier[TRAY_GLOBAL];
 		if (stale && !stale.isDestroyed?.()) stale.destroy();
 
 		this.tray = new Tray(createTrayIcon(this.remote, this.settings.trayIconColor));
 		this.tray.setToolTip("Obsidian");
-		(window as any)[TRAY_GLOBAL] = this.tray;
+		carrier[TRAY_GLOBAL] = this.tray;
 		this.refreshTrayMenu();
 	}
 
 	refreshTrayMenu() {
-		if (!this.tray || this.tray.isDestroyed?.()) return;
+		if (!this.tray || !this.remote || this.tray.isDestroyed?.()) return;
 		const { Menu } = this.remote;
-		const template: any[] = [
+		const template: ElectronMenuItem[] = [
 			{
 				label: "Headless",
 				type: "checkbox",
 				checked: this.headless,
-				click: (item: any) => this.setHeadless(item.checked),
+				click: (item) => this.setHeadless(item.checked),
 			},
 			{ type: "separator" },
 			{
@@ -204,7 +262,7 @@ export default class HeadlessModePlugin extends Plugin {
 				label: "Quit Obsidian",
 				click: () => {
 					this.destroyTray();
-					this.remote.app.quit();
+					this.remote?.app.quit();
 				},
 			},
 		];
@@ -212,14 +270,15 @@ export default class HeadlessModePlugin extends Plugin {
 	}
 
 	refreshTrayIcon() {
-		if (!this.tray || this.tray.isDestroyed?.()) return;
+		if (!this.tray || !this.remote || this.tray.isDestroyed?.()) return;
 		this.tray.setImage(createTrayIcon(this.remote, this.settings.trayIconColor));
 	}
 
 	private destroyTray() {
 		if (this.tray && !this.tray.isDestroyed?.()) this.tray.destroy();
 		this.tray = null;
-		(window as any)[TRAY_GLOBAL] = undefined;
+		const carrier = window as unknown as TrayGlobalCarrier;
+		carrier[TRAY_GLOBAL] = undefined;
 	}
 
 	async loadSettings() {
@@ -246,7 +305,7 @@ class HeadlessModeSettingTab extends PluginSettingTab {
 		new Setting(containerEl)
 			.setName("Start headless")
 			.setDesc(
-				"Launch Obsidian directly into headless mode: windows hidden, only the menu bar icon visible."
+				"Launch directly into headless mode: windows hidden, only the menu bar icon visible."
 			)
 			.addToggle((toggle) =>
 				toggle
@@ -260,7 +319,7 @@ class HeadlessModeSettingTab extends PluginSettingTab {
 		new Setting(containerEl)
 			.setName("Hide Dock icon while headless")
 			.setDesc(
-				"macOS only. Remove Obsidian from the Dock while headless; it returns when you uncheck Headless in the menu bar."
+				"macOS only. Remove the app from the Dock while headless; it returns when you uncheck Headless in the menu bar."
 			)
 			.addToggle((toggle) =>
 				toggle
