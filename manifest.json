@@ -1,0 +1,10 @@
+{
+	"id": "headless-mode",
+	"name": "Headless Mode",
+	"version": "1.0.0",
+	"minAppVersion": "1.4.0",
+	"description": "Run Obsidian headless: hide every window and the Dock icon while Obsidian keeps running from a menu bar (tray) icon, until Headless is unchecked.",
+	"author": "Meirakami",
+	"authorUrl": "https://github.com/powderfirm-ship-it/obsidian-headless-mode",
+	"isDesktopOnly": true
+}

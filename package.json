@@ -1,0 +1,20 @@
+{
+	"name": "obsidian-headless-mode",
+	"version": "1.0.0",
+	"description": "Run Obsidian headless from the menu bar tray, hidden from the Dock until toggled back.",
+	"main": "main.js",
+	"scripts": {
+		"dev": "node esbuild.config.mjs",
+		"build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production"
+	},
+	"keywords": ["obsidian", "obsidian-plugin", "tray", "headless", "menubar"],
+	"author": "Meirakami",
+	"license": "MIT",
+	"devDependencies": {
+		"@types/node": "^20.11.0",
+		"builtin-modules": "^3.3.0",
+		"esbuild": "^0.21.0",
+		"obsidian": "latest",
+		"typescript": "^5.4.0"
+	}
+}
