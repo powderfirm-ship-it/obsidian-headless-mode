@@ -28,16 +28,25 @@ function isNewerVersion(candidate: string, current: string): boolean {
 	return false;
 }
 
+type TrayIconColor = "auto" | "white" | "black";
+
 interface HeadlessModeSettings {
 	/** Launch Obsidian straight into headless mode. */
 	startHeadless: boolean;
 	/** Hide the Dock icon while headless (macOS only). */
 	hideDockIcon: boolean;
+	/**
+	 * Menu bar icon color. "auto" lets macOS tint a template image (the
+	 * historical behavior); "white"/"black" force an explicit fill that
+	 * ignores menu bar appearance.
+	 */
+	trayIconColor: TrayIconColor;
 }
 
 const DEFAULT_SETTINGS: HeadlessModeSettings = {
 	startHeadless: false,
 	hideDockIcon: true,
+	trayIconColor: "white",
 };
 
 // Survives plugin reloads so we never leak a second tray icon.
@@ -68,7 +77,10 @@ function getElectronRemote(): any {
  * assets. A template image (pure black + alpha) lets macOS tint it correctly
  * for light/dark menu bars.
  */
-function createTrayIcon(remote: any): any {
+function createTrayIcon(remote: any, color: TrayIconColor): any {
+	// Template mode requires pure black + alpha; explicit colors must not be
+	// template images or macOS will re-tint them.
+	const fill = color === "black" ? "#000000" : "#ffffff";
 	const image = remote.nativeImage.createEmpty();
 	for (const scale of [1, 2]) {
 		const size = 16 * scale;
@@ -79,7 +91,7 @@ function createTrayIcon(remote: any): any {
 		const s = scale;
 
 		// Gem silhouette: a kite-shaped crystal.
-		ctx.fillStyle = "#000000";
+		ctx.fillStyle = color === "auto" ? "#000000" : fill;
 		ctx.beginPath();
 		ctx.moveTo(8 * s, 1 * s);
 		ctx.lineTo(13.5 * s, 5.5 * s);
@@ -88,7 +100,8 @@ function createTrayIcon(remote: any): any {
 		ctx.closePath();
 		ctx.fill();
 
-		// Carve a facet line out of the fill (template images only use alpha).
+		// Carve facet lines out of the fill via destination-out so they read
+		// as transparent regardless of the fill color.
 		ctx.globalCompositeOperation = "destination-out";
 		ctx.lineWidth = 1 * s;
 		ctx.beginPath();
@@ -106,7 +119,7 @@ function createTrayIcon(remote: any): any {
 			dataURL: canvas.toDataURL("image/png"),
 		});
 	}
-	image.setTemplateImage(true);
+	if (color === "auto") image.setTemplateImage(true);
 	return image;
 }
 
@@ -200,7 +213,7 @@ export default class HeadlessModePlugin extends Plugin {
 		const stale = (window as any)[TRAY_GLOBAL];
 		if (stale && !stale.isDestroyed?.()) stale.destroy();
 
-		this.tray = new Tray(createTrayIcon(this.remote));
+		this.tray = new Tray(createTrayIcon(this.remote, this.settings.trayIconColor));
 		this.tray.setToolTip("Obsidian");
 		(window as any)[TRAY_GLOBAL] = this.tray;
 		this.refreshTrayMenu();
@@ -315,6 +328,11 @@ export default class HeadlessModePlugin extends Plugin {
 		}
 	}
 
+	refreshTrayIcon() {
+		if (!this.tray || this.tray.isDestroyed?.()) return;
+		this.tray.setImage(createTrayIcon(this.remote, this.settings.trayIconColor));
+	}
+
 	private destroyTray() {
 		if (this.tray && !this.tray.isDestroyed?.()) this.tray.destroy();
 		this.tray = null;
@@ -373,6 +391,24 @@ class HeadlessModeSettingTab extends PluginSettingTab {
 							if (value) remote?.app.dock?.hide();
 							else remote?.app.dock?.show();
 						}
+					})
+			);
+
+		new Setting(containerEl)
+			.setName("Menu bar icon color")
+			.setDesc(
+				"White and Black force an explicit color. Auto uses a macOS template image that the system tints to match the menu bar (may render black on translucent menu bars)."
+			)
+			.addDropdown((dropdown) =>
+				dropdown
+					.addOption("white", "White")
+					.addOption("black", "Black")
+					.addOption("auto", "Auto (macOS template)")
+					.setValue(this.plugin.settings.trayIconColor)
+					.onChange(async (value) => {
+						this.plugin.settings.trayIconColor = value as TrayIconColor;
+						await this.plugin.saveSettings();
+						this.plugin.refreshTrayIcon();
 					})
 			);
 
